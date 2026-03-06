@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Three.js Multiplayer Mystery</title>
+    <style>
+        body { margin: 0; overflow: hidden; font-family: sans-serif; }
+        #instructions {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            background: rgba(0,0,0,0.8); color: white; padding: 20px;
+            text-align: center; cursor: pointer; z-index: 10;
+        }
+    </style>
+</head>
+<body>
+
+<div id="instructions">
+    <h1>Нажми, чтобы играть</h1>
+    <p>(WASD = Ходить, Мышь = Поворот)</p>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="/socket.io/socket.io.js"></script>
+
+<script>
+    let scene, camera, renderer, socket;
+    let localPlayer, controls;
+    const remotePlayers = {};
+    const moveState = { forward: false, backward: false, left: false, right: false };
+
+    init();
+    animate();
+
+    function init() {
+        // 1. Сцена и Камера
+        scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x111111);
+        camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+
+        // 2. Свет и Сетка
+        const light = new THREE.HemisphereLight(0xffffff, 0x444444, 1);
+        scene.add(light);
+        const grid = new THREE.GridHelper(200, 50, 0x00ff00, 0x444444);
+        scene.add(grid);
+
+        // 3. Рендерер
+        renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        // 4. Логика Socket.io
+        socket = io();
+
+        socket.on('currentPlayers', (players) => {
+            Object.keys(players).forEach((id) => {
+                if (id === socket.id) {
+                    createLocalPlayer(players[id]);
+                } else {
+                    addRemotePlayer(players[id]);
+                }
+            });
+        });
+
+        socket.on('newPlayer', (playerInfo) => addRemotePlayer(playerInfo));
+        
+        socket.on('playerMoved', (playerInfo) => {
+            if (remotePlayers[playerInfo.id]) {
+                remotePlayers[playerInfo.id].position.set(playerInfo.x, 1, playerInfo.z);
+                remotePlayers[playerInfo.id].rotation.y = playerInfo.ry;
+            }
+        });
+
+        // 5. Управление (Pointer Lock)
+        const inst = document.getElementById('instructions');
+        inst.addEventListener('click', () => {
+            document.body.requestPointerLock();
+        });
+
+        document.addEventListener('pointerlockchange', () => {
+            inst.style.display = document.pointerLockElement ? 'none' : 'block';
+        });
+
+        document.addEventListener('mousemove', (e) => {
+            if (document.pointerLockElement && localPlayer) {
+                localPlayer.rotation.y -= e.movementX * 0.002;
+            }
+        });
+
+        window.addEventListener('keydown', (e) => handleKey(e.code, true));
+        window.addEventListener('keyup', (e) => handleKey(e.code, false));
+    }
+
+    function handleKey(code, isPressed) {
+        if (code === 'KeyW') moveState.forward = isPressed;
+        if (code === 'KeyS') moveState.backward = isPressed;
+        if (code === 'KeyA') moveState.left = isPressed;
+        if (code === 'KeyD') moveState.right = isPressed;
+    }
+
+    function createLocalPlayer(data) {
+        const geo = new THREE.BoxGeometry(1, 2, 1);
+        const mat = new THREE.MeshLambertMaterial({ color: data.color });
+        localPlayer = new THREE.Mesh(geo, mat);
+        localPlayer.position.y = 1;
+        scene.add(localPlayer);
+        
+        // Камера следует за игроком
+        localPlayer.add(camera);
+        camera.position.set(0, 2, 5); // Вид от третьего лица
+    }
+
+    function addRemotePlayer(data) {
+        if (remotePlayers[data.id]) return;
+        const geo = new THREE.BoxGeometry(1, 2, 1);
+        const mat = new THREE.MeshLambertMaterial({ color: data.color });
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.position.set(data.x, 1, data.z);
+        
+        // Никнейм над головой (простой текст через Sprite)
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = 'white';
+        ctx.font = '40px Arial';
+        ctx.fillText(data.nickname, 10, 50);
+        const texture = new THREE.CanvasTexture(canvas);
+        const spriteMat = new THREE.SpriteMaterial({ map: texture });
+        const sprite = new THREE.Sprite(spriteMat);
+        sprite.position.y = 1.5;
+        sprite.scale.set(2, 1, 1);
+        mesh.add(sprite);
+
+        scene.add(mesh);
+        remotePlayers[data.id] = mesh;
+    }
+
+    function animate() {
+        requestAnimationFrame(animate);
+
+        if (localPlayer && document.pointerLockElement) {
+            const speed = 0.15;
+            const direction = new THREE.Vector3();
+            
+            if (moveState.forward) direction.z -= speed;
+            if (moveState.backward) direction.z += speed;
+            if (moveState.left) direction.x -= speed;
+            if (moveState.right) direction.x += speed;
+
+            direction.applyQuaternion(localPlayer.quaternion);
+            localPlayer.position.add(direction);
+
+            // Отправляем координаты серверу
+            socket.emit('playerMovement', {
+                x: localPlayer.position.x,
+                z: localPlayer.position.z,
+                ry: localPlayer.rotation.y
+            });
+        }
+
+        renderer.render(scene, camera);
+    }
+
+    window.addEventListener('resize', () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+</script>
+</body>
+</html>
